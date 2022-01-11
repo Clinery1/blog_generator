@@ -48,7 +48,7 @@ async function build_file(path:string,prefix:string,ending:string):Promise<PageS
     let metadata:PageMetadata=JSON.parse(Deno.readTextFileSync(without_extension+".json"));  // reads path/to/example.json
     let page_path=file_name_from_path(without_extension)+".html";  // example: example.html
     let contents="# $title\nCreated: $creationDate\n\nLast edited: $editDate\n\n---------\n"+Deno.readTextFileSync(path);
-    let output_html=html(tokens(contents));
+    let output_html=html(tokens(contents,{strikethrough:true}));
     let all_html:string=prefix+output_html+ending;
     let modified=await edited_time(path);
     let modified_date;
@@ -88,7 +88,7 @@ async function edited_time(file_path:string):Promise<string|null> {
 function formatted_time(date:Date):string {
     return String(date.getMonth()+1)+"/"+String(date.getDate())+"/"+String(date.getFullYear())+"@"+String(date.getHours())+":"+String(date.getMinutes());
 }
-async function process_dir(source_path:string,dest_path:string,newer_skip:boolean) {
+async function process_dir(source_path:string,dest_path:string,check_newer:boolean) {
     let prefix=Deno.readTextFileSync(source_path+"/prefix.html");
     let ending=Deno.readTextFileSync(source_path+"/ending.html");
     let entries=[];
@@ -98,22 +98,37 @@ async function process_dir(source_path:string,dest_path:string,newer_skip:boolea
             let source=await build_file(source_path+"/"+entry.name,prefix,ending);
             let html=source.html;
             entries.push(source.entry);
-            try {
-                let file_dest_path=dest_path+remove_extension(entry.name)+".html";
-                let file_dest=Deno.openSync(file_dest_path);
-                let file_source=Deno.openSync(source_path+"/"+entry.name);
-                let file_mtime=Deno.fstatSync(file_source.rid).mtime;
-                let file_dest_mtime=Deno.fstatSync(file_dest.rid).mtime;
-                file_dest.close();
-                file_source.close();
-                // skip this file if it is older than the compiled version
-                if (file_mtime!=null&&file_dest_mtime!=null&&newer_skip) {
-                    if (file_mtime < file_dest_mtime) {
-                        console.log("Not saving file "+entry.name);
-                        continue;
+            // If we want to check newer, then try this. Otherwise, just write to the file
+            if (check_newer) {
+                try {
+                    let file_dest_path=dest_path+"/"+remove_extension(entry.name)+".html";
+                    let file_source_path=source_path+"/"+entry.name;
+
+                    // debug stuff
+                    // console.log("File path: "+file_source_path);
+                    // console.log("File dest path: "+file_dest_path);
+
+                    let file_dest=Deno.openSync(file_dest_path);
+                    let file_source=Deno.openSync(file_source_path);
+                    let file_mtime=Deno.fstatSync(file_source.rid).mtime;
+                    let file_dest_mtime=Deno.fstatSync(file_dest.rid).mtime;
+                    file_dest.close();
+                    file_source.close();
+
+                    // debug stuff
+                    // console.log("File mtime: "+String(file_mtime));
+                    // console.log("File dest mtime: "+String(file_dest_mtime));
+
+                    // Check if there is a valid mtime
+                    if (file_mtime!=null&&file_dest_mtime!=null) {
+                        // skip this file if it is older than the compiled version
+                        if (file_mtime < file_dest_mtime) {
+                            console.log("Not saving file "+entry.name);
+                            continue;
+                        }
                     }
-                }
-            } catch {}
+                } catch {}
+            }
             console.log("Saving "+entry.name);
             await Deno.writeTextFile(dest_path+"/"+source.entry.page_path,html,);
         }
@@ -122,7 +137,7 @@ async function process_dir(source_path:string,dest_path:string,newer_skip:boolea
     await Deno.writeTextFile(dest_path+"/index.json",entries_string);
 }
 async function main(args:string[]) {
-    let all=false;
+    let all=false;  // if true, build all regardless of dates
     let action=args[0];
     let dest_path=default_dest_path;
     let source_path=default_source_path;
@@ -141,12 +156,9 @@ async function main(args:string[]) {
             }
         }
     }
+    console.log("All: "+String(all));
     if (action=="build") {
-        if (all) {
-            await process_dir(source_path,dest_path,false);
-        } else {
-            await process_dir(source_path,dest_path,true);
-        }
+        await process_dir(source_path,dest_path,!all);
     } else if (action=="edit"||action=="new") { // The same editing code is used for both `new` and `edit`, so we just use another if inside this to do the `new` code
         if (args.length==1) {
             console.log("Please provide a file name in the arguments (.md will be appended automatically)");
@@ -170,7 +182,7 @@ async function main(args:string[]) {
         let p=Deno.run({
             cmd:[
                 editor,
-                source_path+args[1]+".md",
+                source_path+"/"+args[1]+".md",
             ],
         });
         await p.status();
@@ -178,16 +190,12 @@ async function main(args:string[]) {
         p=Deno.run({
             cmd:[
                 editor,
-                source_path+args[1]+".json",
+                source_path+"/"+args[1]+".json",
             ],
         });
         await p.status();
         p.close();
-        if (all) {
-            await process_dir(source_path,dest_path,false);
-        } else {
-            await process_dir(source_path,dest_path,true);
-        }
+        await process_dir(source_path,dest_path,!all);
     } else if (action=="remove") {
         if (args.length==1) {
             console.log("Please provide a file name in the arguments (.md will be appended automatically)");
